@@ -1,0 +1,8 @@
+requests
+python-dotenv
+anthropic
+schedule
+openai
+Pillow
+cloudinary
+discord.py

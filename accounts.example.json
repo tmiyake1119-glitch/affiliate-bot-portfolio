@@ -1,0 +1,30 @@
+[
+  {
+    "name": "your_account_1",
+    "genre_filter": null,
+    "threads_token": "",
+    "threads_user_id": "me",
+    "ab_test": true,
+    "ab_platform": "instagram",
+    "_comment": "genre_filter=null は全ジャンル対象。threads_token 未設定時は THREADS_ACCESS_TOKEN を使用"
+  },
+  {
+    "name": "your_account_2",
+    "genre_filter": ["カテゴリA", "カテゴリB", "カテゴリC"],
+    "threads_token": "",
+    "threads_user_id": "",
+    "instagram_access_token_env": "INSTAGRAM_ACCESS_TOKEN_ACCOUNT2",
+    "instagram_user_id_env": "INSTAGRAM_USER_ID_ACCOUNT2",
+    "ab_test": false,
+    "_comment": "instagram_access_token_env で .env の変数名を指定（アカウントごとにトークンを分離）"
+  },
+  {
+    "name": "your_account_3",
+    "genre_filter": ["カテゴリD", "カテゴリE"],
+    "threads_token": "",
+    "threads_user_id": "",
+    "instagram_access_token_env": "INSTAGRAM_ACCESS_TOKEN_ACCOUNT3",
+    "instagram_user_id_env": "INSTAGRAM_USER_ID_ACCOUNT3",
+    "ab_test": false
+  }
+]
