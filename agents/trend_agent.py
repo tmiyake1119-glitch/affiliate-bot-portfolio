@@ -93,6 +93,33 @@ GENRES = {
     "contact":     "コンタクトレンズ 人気 ワンデー",
 }
 
+WINE_GIFT_KEYWORDS = ["ギフト", "セット", "飲み比べ", "木箱", "化粧箱", "詰め合わせ"]
+
+PET_CONSUMABLE_KEYWORDS = ["フード", "ごはん", "おやつ", "シート", "砂", "消臭", "ペットシーツ"]
+PET_CARE_KEYWORDS       = ["シャンプー", "ブラシ", "爪切り", "歯ブラシ", "サプリ", "ケア"]
+PET_TOY_KEYWORDS        = ["おもちゃ", "ボール", "ロープ", "ベッド", "マット", "クッション"]
+
+
+def classify_wine(product: dict) -> str:
+    name  = product.get("name", "")
+    price = product.get("price", 0)
+    if any(kw in name for kw in WINE_GIFT_KEYWORDS):
+        return "wine_gift"
+    if price >= 3000:
+        return "wine_premium"
+    return "wine_daily"
+
+
+def classify_pet(product: dict) -> str:
+    name = product.get("name", "")
+    if any(kw in name for kw in PET_CONSUMABLE_KEYWORDS):
+        return "pet_consumable"
+    if any(kw in name for kw in PET_CARE_KEYWORDS):
+        return "pet_care"
+    if any(kw in name for kw in PET_TOY_KEYWORDS):
+        return "pet_toy"
+    return "pet"
+
 
 def fetch_ranking(genre_name: str, keyword: str, hits: int = 30) -> list[dict]:
     params = {
@@ -142,7 +169,18 @@ def fetch_ranking(genre_name: str, keyword: str, hits: int = 30) -> list[dict]:
             "limitedFlag":    item.get("limitedFlag", 0),
             "asurakuFlag":    item.get("asurakuFlag", 0),
         }
+        if genre_name == "wine":
+            product["genre"] = classify_wine(product)
+        elif genre_name == "pet":
+            product["genre"] = classify_pet(product)
         products.append(product)
+
+    if genre_name in ("wine", "pet"):
+        sub_counts: dict[str, int] = {}
+        for p in products:
+            sub_counts[p["genre"]] = sub_counts.get(p["genre"], 0) + 1
+        logger.info("[TrendAgent] %s subcategory counts: %s", genre_name, sub_counts)
+        print(f"[TrendAgent] {genre_name} subcategory counts: {sub_counts}")
 
     return products
 
