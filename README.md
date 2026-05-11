@@ -25,7 +25,10 @@ ConoHa VPS上でcron（1日4回）により稼働しており、3アカウント
 | SNS API | Instagram Graph API / Threads API / Bluesky AT Protocol |
 | 商品情報 | 楽天ウェブサービス（ランキング API） |
 | 画像生成 | Pillow（テキスト合成） + Cloudinary（CDN配信） |
-| LLM | Claude API（Haiku）・OpenAI API（投稿文生成） |
+| LLM（投稿文生成） | OpenAI GPT-4o（`post_generator`） |
+| LLM（戦略・分析） | OpenAI GPT-4o-mini（`strategy_agent` / `content_optimizer` / `trend_analyzer`） |
+| LLM（知識ベース更新） | Claude Haiku（`claude-haiku-4-5-20251001`）（`learning_agent`） |
+| LLMブリッジ | `llm_core_bridge`（`USE_LLM_CORE=true` でマルチLLMオーケストレーターに切替） |
 | 通知 | Discord Webhook / Discord Bot |
 | インフラ | ConoHa VPS / cron（1日4回実行） |
 
@@ -34,37 +37,69 @@ ConoHa VPS上でcron（1日4回）により稼働しており、3アカウント
 ## アーキテクチャ
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  cron (1日4回: 9/13/17/21 JST)                                  │
-│       ↓                                                          │
-│  main.py                                                         │
-│  ├── Step 1  楽天API → トレンド商品取得 (trend_agent)            │
-│  ├── Step 2  商品選定・スコアリング (product_selector)            │
-│  │             └── CTRウェイト × 季節ブースト × A/Bグループ割当 │
-│  ├── Step 3  商品フォーマット整形 (formatter)                    │
-│  ├── Step 4  LLMで投稿文生成 → posts_queue に保存 (post_generator)│
-│  │                                                               │
-│  ├── Step 6  各SNSへ実投稿（アカウントループ）                   │
-│  │   ├── BANリスク評価 (ban_risk_monitor)                        │
-│  │   ├── 日次上限チェック (post_counter)                         │
-│  │   ├── 画像生成 (image_generator) → Cloudinaryアップロード     │
-│  │   ├── Threads投稿 (threads_poster)                            │
-│  │   ├── Instagram投稿 (instagram_poster)                        │
-│  │   └── Bluesky投稿 (bluesky_poster)                            │
-│  │                                                               │
-│  ├── Step 7  エンゲージメント分析 (analytics_agent)              │
-│  │             └── A/Bテスト評価 → ab_config.json 更新           │
-│  ├── Step 8  週次レポート・投稿文自動改善 [月曜]                  │
-│  ├── Step 9  週間ダイジェスト投稿 [日曜]                         │
-│  └── Step 15 DBバックアップ (db_backup)                          │
-│                                                                   │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
-│  │ SQLite DB    │   │ Discord通知  │   │ learning_agent       │ │
-│  │ post_logs    │   │ 投稿完了     │   │ (週次cron 月曜3時)   │ │
-│  │ ab_results   │   │ エラー       │   │ knowledge/ファイル   │ │
-│  │ follower_h.. │   │ 週次レポート │   │ を自動更新           │ │
-│  └──────────────┘   └──────────────┘   └──────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  cron (1日4回: 9/13/17/21 JST)                                      │
+│       ↓                                                              │
+│  main.py                                                             │
+│  ├── 前処理  pause.txt 緊急停止チェック                              │
+│  ├── 前処理  フォロワー数ティア判定 → 投稿アクション決定             │
+│  │             └── <200: engage優先 / 200-499: 均等 / 500+: 4回投稿  │
+│  ├── 前処理  Instagram/Threadsトークン有効期限チェック・自動更新     │
+│  │                                                                   │
+│  ├── Step 1  楽天API → トレンド商品取得 (trend_agent)                │
+│  ├── Step 2  商品選定・スコアリング (product_selector) ─アカウント別─│
+│  │             └── CTRウェイト × 季節ブースト × 価格異常分類         │
+│  │             └── ジャンル均等化ボーナス × A/Bグループ割当          │
+│  ├── Step 3  商品フォーマット整形 (formatter)                        │
+│  ├── Step 4  LLMで投稿文生成 → posts_queue に保存 (post_generator)   │
+│  │             └── knowledge/ 参照 + セールバナー付与                │
+│  ├── Step 5b キュー残数自動補充 (refill_queue, min_pending=3)        │
+│  │                                                                   │
+│  ├── Step 6  各SNSへ実投稿（アカウントループ）                       │
+│  │   ├── BANリスク評価 (ban_risk_monitor)                            │
+│  │   ├── 日次上限チェック (post_counter)                             │
+│  │   ├── AutoRecovery 停止フラグ確認 (auto_recovery_agent)           │
+│  │   ├── 画像生成 (image_generator) → Cloudinaryアップロード         │
+│  │   ├── Threads投稿 (threads_poster)                                │
+│  │   ├── Instagram投稿 (instagram_poster)                            │
+│  │   └── Bluesky投稿 (bluesky_poster) ※mono_zukan_jpのみ            │
+│  │                                                                   │
+│  ├── Step 7  エンゲージメント分析 (analytics_agent)                  │
+│  ├── Step 7b フォロワー数記録 (fetch_follower_count) ─全プラット─   │
+│  ├── Step 7d 戦略ミーティング (strategy_agent) [9:00 JST]            │
+│  │             └── GPT-4o-mini で今日の投稿戦略JSON生成→Discord送信  │
+│  ├── Step 7e 朝のフォローリマインダー (follow_reminder) [9:00 JST]   │
+│  ├── Step 7f A/Bテスト評価 (evaluate_ab_test)                        │
+│  │             └── グループ別エンゲージメント率集計 → Discord通知     │
+│  │                                                                   │
+│  ├── Step 8  週次レポート生成・Discord送信 [月曜]                    │
+│  ├── Step 8b A/B比率自動調整 (auto_adjust_ab_ratio) [月曜]           │
+│  ├── Step 8c 投稿文自動改善ループ (content_optimizer) [月曜 9:00]    │
+│  │             └── 低エンゲージメント投稿文を GPT-4o-mini で再生成   │
+│  │                                                                   │
+│  ├── Step 9  週間ダイジェスト投稿 [日曜]                             │
+│  ├── Step 9b 週次トレンド分析 (trend_analyzer) [日曜 9:00]           │
+│  │             └── 12ジャンル急上昇検知 → GPT-4o-mini でレポート     │
+│  │                                                                   │
+│  ├── Step 10 エンゲージメント投稿 (engagement_poster) [21:00]        │
+│  ├── Step 10b 1日サマリー通知 (daily_summary_notifier) [22:00]       │
+│  ├── Step 10c 夜のフォローリマインダー (follow_reminder) [21:00]     │
+│  │                                                                   │
+│  ├── Step 11 商品比較投稿 (comparison_poster) [水曜]                 │
+│  ├── Step 12 価格帯別特集投稿 (price_range_poster) [木曜]            │
+│  ├── Step 13 月次ランキング投稿 (monthly_ranking) [月末]             │
+│  ├── Step 14 レアアイテム在庫監視 (rare_item_monitor) [毎回]         │
+│  │             └── 入荷速報 / 再入荷 / 売切れ → Discord通知          │
+│  └── Step 15 DBバックアップ (db_backup) [毎回]                       │
+│                                                                       │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐ │
+│  │ SQLite DB    │   │ Discord通知  │   │ learning_agent           │ │
+│  │ post_logs    │   │ 投稿完了     │   │ (週次cron 月曜3時JST)    │ │
+│  │ ab_results   │   │ エラー       │   │ Claude Haiku で分析      │ │
+│  │ follower_h.. │   │ 週次レポート │   │ knowledge/ファイル更新   │ │
+│  │ learning_d.. │   │ 戦略サマリー │   └──────────────────────────┘ │
+│  └──────────────┘   └──────────────┘                                 │
+└─────────────────────────────────────────────────────────────────────┘
 
 マルチアカウント構成:
   accounts.json
@@ -96,11 +131,12 @@ score = rank_score
       × ctr_weight             # 過去実績CTRウェイト（アカウント別）
       × seasonal_boost         # 季節性ブースト（春節・バレンタイン等）
       × price_filter           # 価格帯フィルタ（500〜5000円）
+      + diversity_bonus        # ジャンル均等化ボーナス（最大+50%）
       - duplicate_penalty      # 最近投稿済み商品の重複ペナルティ
 ```
 
 ### learning_agent による知識ベース自動更新
-週次で過去の投稿データをClaude API（Haiku）で分析し、  
+週次で過去の投稿データをClaude Haiku（`claude-haiku-4-5-20251001`）で分析し、  
 `knowledge/` ディレクトリの以下ファイルを自動更新する。
 
 - `genre_trends.md` : ジャンル別成功傾向  
@@ -124,6 +160,56 @@ PRICE_FILTER_MAX = int(os.getenv("PRICE_FILTER_MAX", "5000"))
 ```
 VPSの`.env`を1行書き換えるだけで再デプロイ不要。
 
+### 楽天セール期間の自動検知（sale_detector.py）
+スーパーSALE・マラソン・0と5のつく日を自動検知し、投稿文にセールバナーを付与する。
+
+```python
+# セール期間中は投稿文の冒頭にバナーを追加
+"🎉 楽天スーパーSALE開催中！"  # → 期間限定で最大50%OFF＋ポイント最大43倍！
+```
+
+### 季節性ハッシュタグの自動付与（seasonal_content.py）
+月別に6シーズン分の季節キーワードとジャンルブーストを管理し、  
+商品のジャンルに応じた季節ハッシュタグを投稿文に自動付与する。
+
+```
+3〜4月: 新生活・入学・花見  → food / kitchen / daily_goods をブースト
+7〜8月: 夏・BBQ・熱中症対策 → outdoor / pet をブースト
+11〜12月: クリスマス・お歳暮 → furusato / food / alcohol をブースト
+```
+
+### 毎朝の戦略ミーティング（strategy_agent.py）
+毎朝9時JST、直近のエンゲージメント実績・A/B結果・フォロワー数をもとに  
+GPT-4o-miniが今日の投稿戦略JSONを生成してDiscordに送信する。  
+生成結果は`data/daily_strategy.json`に保存され、`post_generator`が参照して投稿トーンを決定する。
+
+### 投稿文自動改善ループ（content_optimizer.py）
+月曜9時JST、低エンゲージメント投稿文を自動分析し、  
+GPT-4o-miniで改善テンプレートを生成して`post_generator.py`の`ACCOUNT_OPENERS`を更新する。
+
+```
+low-engagement投稿文 → GPT-4o-mini で改善案生成 → ACCOUNT_OPENERS に追記
+```
+
+### 週次トレンド分析（trend_analyzer.py）
+日曜9時JST、楽天APIで12ジャンルの急上昇商品を検知し、  
+季節キーワードの検索件数変化とあわせてGPT-4o-miniでトレンドレポートを生成する。  
+結果は`data/trend_history.json`に蓄積し、`daily_strategy.json`に反映される。
+
+### フォロワー数ティア連動の投稿戦略（follower_strategy.py）
+フォロワー数に応じて時間帯別の投稿アクションを自動切替。  
+200・500フォロワー到達時にDiscordへマイルストーン通知を送信する。
+
+```
+< 200  : 9時=エンゲージメント / 13時=スキップ / 21時=アフィリ
+200-499: 9時=アフィリ / 13時=エンゲージメント / 21時=アフィリ
+500+   : 9/13/18/21時=アフィリ（1日4回投稿体制）
+```
+
+### レアアイテム在庫監視（rare_item_monitor.py）
+指定キーワードで楽天APIを定期検索し、入荷・再入荷・売切れを検知したら即Discord通知。  
+価格履歴も追跡し、価格下落時にも通知する。
+
 ---
 
 ## ディレクトリ構成
@@ -135,19 +221,65 @@ affiliate_bot/
 ├── accounts.example.json    # マルチアカウント設定サンプル
 ├── .env.example             # 環境変数サンプル
 │
-├── agents/                  # 各機能モジュール
-│   ├── trend_agent.py       # 楽天API商品取得
-│   ├── product_selector.py  # スコアリング・商品選定
-│   ├── post_generator.py    # LLMによる投稿文生成
-│   ├── instagram_poster.py  # Instagram投稿
-│   ├── threads_poster.py    # Threads投稿
-│   ├── bluesky_poster.py    # Bluesky投稿
-│   ├── analytics_agent.py   # エンゲージメント分析・A/Bテスト
-│   ├── ab_tester.py         # A/Bテスト管理・比率自動調整
-│   ├── learning_agent.py    # 週次知識ベース更新
+├── agents/                  # 各機能モジュール（45ファイル）
+│   ├── trend_agent.py         # 楽天API商品取得（12ジャンル）
+│   ├── product_selector.py    # スコアリング・商品選定（アカウント別CTRウェイト）
+│   ├── formatter.py           # 楽天レスポンス → 投稿用dict整形
+│   ├── post_generator.py      # GPT-4oによる投稿文生成（knowledge参照・セールバナー付与）
+│   ├── post_manager.py        # posts_queueの保存・補充・取得
+│   ├── sale_detector.py       # 楽天セール期間自動検知
+│   ├── seasonal_content.py    # 季節性ハッシュタグ・ジャンルブースト
+│   ├── threads_poster.py      # Threads投稿
+│   ├── instagram_poster.py    # Instagram投稿
+│   ├── bluesky_poster.py      # Bluesky投稿
+│   ├── x_poster.py            # X(Twitter)投稿（実装済み・APIクレジット有料のため無効化中）
+│   ├── analytics_agent.py     # エンゲージメント分析・フォロワー数記録
+│   ├── ab_tester.py           # A/Bテスト管理・比率自動調整
+│   ├── strategy_agent.py      # 毎朝の戦略ミーティング（GPT-4o-mini）
+│   ├── content_optimizer.py   # 投稿文自動改善ループ（月曜9時）
+│   ├── trend_analyzer.py      # 週次トレンド分析（日曜9時・12ジャンル）
+│   ├── learning_agent.py      # 週次知識ベース更新（Claude Haiku）
 │   ├── auto_recovery_agent.py # 自動回復・BAN回避
-│   ├── database.py          # SQLite管理
-│   └── ...（他40+モジュール）
+│   ├── ban_risk_monitor.py    # BANリスク評価
+│   ├── follower_strategy.py   # フォロワー数ティア連動投稿戦略
+│   ├── follow_reminder.py     # 朝・夜のフォローリマインダー（Discord）
+│   ├── rare_item_monitor.py   # レアアイテム在庫監視・入荷通知
+│   ├── engagement_poster.py   # エンゲージメント投稿（質問・アンケート形式）
+│   ├── digest_poster.py       # 週間ダイジェスト投稿（日曜）
+│   ├── comparison_poster.py   # 商品比較投稿（水曜）
+│   ├── price_range_poster.py  # 価格帯別特集投稿（木曜）
+│   ├── monthly_ranking.py     # 月次ランキング投稿（月末）
+│   ├── daily_summary_notifier.py # 1日サマリーDiscord通知（22時）
+│   ├── amazon_linker.py       # Amazon.co.jp アフィリエイト検索URL生成
+│   ├── image_generator.py     # Pillowによる画像生成（テキスト合成）
+│   ├── image_uploader.py      # Cloudinaryアップロード
+│   ├── url_shortener.py       # URL短縮
+│   ├── token_renewal.py       # Instagram/ThreadsトークンのLong-Lived自動更新
+│   ├── post_counter.py        # 日次投稿上限管理（アカウント別）
+│   ├── database.py            # SQLite管理（post_logs / ab_results / follower_history 等）
+│   ├── db_backup.py           # DBバックアップ（7日自動ローテーション）
+│   ├── discord_notifier.py    # Discord Webhook通知
+│   ├── discord_bot.py         # Discord Bot（コマンド受付）
+│   ├── logger_setup.py        # ロギング設定
+│   ├── llm_core_bridge.py     # llm_coreオーケストレーター統合ブリッジ
+│   ├── video_generator.py     # 動画生成（実装済み・未稼働）
+│   ├── comment_reply_bot.py   # コメント返信Bot（実装済み・未稼働）
+│   └── ...（他モジュール）
+│
+├── knowledge/               # learning_agentが自動更新するナレッジファイル
+│   ├── genre_trends.md        # ジャンル別成功傾向
+│   ├── hooks.md               # 勝ちフック・CTAパターン
+│   ├── cta_patterns.md        # CTAパターン
+│   └── anti_patterns.md       # 避けるべき負けパターン
+│
+├── data/                    # ランタイムデータ（JSON）
+│   ├── ab_config.json         # A/Bテストグループ比率
+│   ├── daily_strategy.json    # 当日の戦略ミーティング結果
+│   ├── trend_history.json     # 週次トレンド履歴
+│   ├── hourly_engagement.json # 時間帯別エンゲージメント
+│   ├── rare_items_seen.json   # レアアイテム状態管理
+│   ├── api_usage.json         # OpenAI API 日次使用量トラッキング
+│   └── backups/               # DBバックアップ（7日間保持）
 │
 ├── dashboard/               # Flask管理画面
 │   └── app.py
@@ -294,11 +426,13 @@ The price anomaly classifier (`_classify_price`) adds a layer on top: items at a
 
 ---
 
-- [ ] Instagram Reels・動画投稿への対応（`video_generator.py` は実装済みだが未稼働）
-- [ ] 楽天以外のアフィリエイト（Amazon PA-API等）の統合
+## TODO
+
+- [ ] Instagram Reels・動画投稿への本格稼働（`video_generator.py` は実装済みだが未稼働）
+- [ ] Amazon PA-API（Product Advertising API）との統合（※検索URLリンク生成は `amazon_linker.py` で実装済み）
 - [ ] エンゲージメント予測モデルの強化（現在はルールベース → ML化）
 - [ ] 管理ダッシュボード（`dashboard/app.py`）のUI改善
-- [ ] X (Twitter) 投稿の再有効化（現在APIクレジット有料のため無効化中）
+- [ ] X (Twitter) 投稿の再有効化（`x_poster.py` は実装済み・現在APIクレジット有料のため無効化中）
 - [ ] コメント返信ボットの本格稼働（`comment_reply_bot.py` は実装済み）
 
 ---
