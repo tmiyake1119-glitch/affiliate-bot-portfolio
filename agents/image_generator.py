@@ -117,13 +117,51 @@ def _extract_features(description: str) -> list:
 
     features = []
     for part in ordered:
-        features.append(part[:15] if len(part) > 15 else part)
+        features.append(part)
         if len(features) >= 3:
             break
 
     while len(features) < 3:
         features.append(fallbacks[len(features)])
     return features
+
+
+def _wrap_feature(text: str, font, draw, max_width_px: int, max_lines: int = 2) -> list:
+    """テキストを max_width_px に収まるよう折り返す。最大 max_lines 行、超過は末尾「…」で省略。"""
+    def measure(s):
+        try:
+            return draw.textlength(s, font=font)
+        except Exception:
+            return len(s) * 22
+
+    lines = []
+    remaining = text
+    while remaining:
+        if len(lines) >= max_lines:
+            break
+        if measure(remaining) <= max_width_px:
+            lines.append(remaining)
+            break
+        if len(lines) == max_lines - 1:
+            lo, hi = 1, len(remaining)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if measure(remaining[:mid] + "…") <= max_width_px:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            lines.append(remaining[:lo] + "…")
+            break
+        lo, hi = 1, len(remaining)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if measure(remaining[:mid]) <= max_width_px:
+                lo = mid
+            else:
+                hi = mid - 1
+        lines.append(remaining[:lo])
+        remaining = remaining[lo:]
+    return lines or [text[:10] + "…"]
 
 
 def generate_image(product: dict) -> str | None:
@@ -183,9 +221,28 @@ def generate_image(product: dict) -> str | None:
     # ── 特徴3つ（product_descriptionから抽出） ────────────────
     features = _extract_features(product.get("product_description", ""))
     font_feat = _get_font(22)
-    for i, feat in enumerate(features[:3]):
-        fy = bar_y + 52 + i * 32
-        draw.text((36, fy), f"・{feat}", font=font_feat, fill=(200, 200, 200, 255))
+    feat_line_h = 27
+    feat_max_y = bar_y + 148
+    bullet = "・"
+    try:
+        bullet_w = int(draw.textlength(bullet, font=font_feat))
+    except Exception:
+        bullet_w = 22
+    feat_text_w = CANVAS_SIZE[0] - 36 - 36 - bullet_w
+    fy = bar_y + 52
+    stop = False
+    for feat in features[:3]:
+        if stop:
+            break
+        lines = _wrap_feature(feat, font_feat, draw, feat_text_w)
+        for j, line in enumerate(lines):
+            if fy > feat_max_y:
+                stop = True
+                break
+            x_off = 36 if j == 0 else 36 + bullet_w
+            prefix = bullet if j == 0 else ""
+            draw.text((x_off, fy), prefix + line, font=font_feat, fill=(200, 200, 200, 255))
+            fy += feat_line_h
 
     # ── 価格テキスト ──────────────────────────────────────────
     price_val = product.get("price", 0) or 0
